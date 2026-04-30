@@ -1,14 +1,19 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+from sklearn.metrics import mean_squared_error
+from sklearn.compose import ColumnTransformer
 from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 
 DATA_PATH = Path("WestRoxbury.csv")
 OUTPUT_PATH = Path("WestRoxbury_preprocessed.csv")
 TARGET_COLUMN = "TOTAL_VALUE"
+K_FOLDS = 5
 
 
 def clean_column_names(df: pd.DataFrame) -> pd.DataFrame:
@@ -77,6 +82,58 @@ def fit_linear_regression(X_train: pd.DataFrame, y_train: pd.Series) -> LinearRe
     return model
 
 
+def calculate_mse(
+    model: LinearRegression,
+    X_train: pd.DataFrame,
+    X_test: pd.DataFrame,
+    y_train: pd.Series,
+    y_test: pd.Series,
+) -> tuple[float, float]:
+    """Calculate mean squared error for train and test predictions."""
+    train_mse = mean_squared_error(y_train, model.predict(X_train))
+    test_mse = mean_squared_error(y_test, model.predict(X_test))
+
+    return train_mse, test_mse
+
+
+def cross_validate_linear_regression(
+    df: pd.DataFrame,
+    k: int = K_FOLDS,
+) -> tuple[np.ndarray, float, float]:
+    """Run k-fold cross-validation and summarize RMSE scores."""
+    X = df.drop(columns=TARGET_COLUMN)
+    y = df[TARGET_COLUMN]
+    numeric_columns = X.select_dtypes(include="number").columns[
+        ~X.select_dtypes(include="number").columns.str.startswith("REMODEL_")
+    ]
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("scale_numeric", StandardScaler(), numeric_columns),
+        ],
+        remainder="passthrough",
+    )
+    model = Pipeline(
+        steps=[
+            ("preprocessor", preprocessor),
+            ("linear_regression", LinearRegression()),
+        ]
+    )
+
+    scores = cross_val_score(
+        estimator=model,
+        X=X,
+        y=y,
+        cv=k,
+        scoring="neg_root_mean_squared_error",
+    )
+    rmse_scores = -scores
+    mean_rmse = np.mean(rmse_scores)
+    std_rmse = np.std(rmse_scores)
+
+    return rmse_scores, mean_rmse, std_rmse
+
+
 def build_preprocessed_output(X: pd.DataFrame, y: pd.Series) -> pd.DataFrame:
     """Combine features and target for inspection/export."""
     return pd.concat([y.rename(TARGET_COLUMN), X], axis=1)
@@ -89,6 +146,14 @@ def main() -> None:
     X_train, X_test, y_train, y_test = split_features_target(cleaned_df)
     X_train_scaled, X_test_scaled, scaler = scale_numeric_features(X_train, X_test)
     model = fit_linear_regression(X_train_scaled, y_train)
+    rmse_scores, mean_rmse, std_rmse = cross_validate_linear_regression(cleaned_df)
+    train_mse, test_mse = calculate_mse(
+        model,
+        X_train_scaled,
+        X_test_scaled,
+        y_train,
+        y_test,
+    )
 
     preprocessed_df = build_preprocessed_output(
         pd.concat([X_train_scaled, X_test_scaled]).sort_index(),
@@ -101,6 +166,11 @@ def main() -> None:
     print(f"Training rows: {X_train_scaled.shape[0]}, test rows: {X_test_scaled.shape[0]}")
     print(f"Target column: {TARGET_COLUMN}")
     print(f"Linear regression intercept: {model.intercept_:.4f}")
+    print(f"Training MSE: {train_mse:.4f}")
+    print(f"Test MSE: {test_mse:.4f}")
+    print(f"{K_FOLDS}-fold CV RMSE scores: {rmse_scores.round(4)}")
+    print(f"Mean CV RMSE: {mean_rmse:.4f}")
+    print(f"CV RMSE standard deviation: {std_rmse:.4f}")
     print(f"Scaled numeric feature columns: {', '.join(scaler.feature_names_in_)}")
     print("Columns:")
     print(", ".join(preprocessed_df.columns))
